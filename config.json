@@ -1,0 +1,33 @@
+{
+  "activeProvider": "deepseek",
+  "providers": {
+    "ollama": {
+      "model": "gemini-3-flash-preview:cloud",
+      "temperature": 0.2,
+      "baseUrl": "http://127.0.0.1:11434"
+    },
+    "deepseek": {
+      "model": "deepseek-v4-flash",
+      "temperature": 0.2,
+      "maxTokens": 4096,
+      "apiKey": "",
+      "baseUrl": "https://api.deepseek.com/"
+    }
+  },
+  "limits": {
+    "maxRounds": 6,
+    "maxHistoryItems": 10,
+    "summaryCharLimit": 400
+  },
+  "skill": {
+    "rootDir": "toolkits/cars/skills",
+    "summaryHeadLines": 4
+  },
+  "runtime": {
+    "planOnly": false,
+    "maxStepRounds": 6,
+    "contextWindow": 16,
+    "toolOutputMaxChars": 1200,
+    "maxPlanSteps": 0
+  }
+}
