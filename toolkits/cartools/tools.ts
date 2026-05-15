@@ -26,7 +26,7 @@ export function createCarTools(env: GridCarEnv): Tool[] {
     tool(
       {
         name: "go_to",
-        description: "移动到格点 targetX=行、targetY=列；本轮须已完成 take_photo → detect_objects。",
+        description: "移动到格点 targetX=行、targetY=列；本轮须已已知距离，如果距离未知请先 take_photo → detect_objects。",
         inputs: {
           targetX: { type: "number", description: "行（0 起）" },
           targetY: { type: "number", description: "列（0 起）" }
@@ -38,7 +38,7 @@ export function createCarTools(env: GridCarEnv): Tool[] {
     tool(
       {
         name: "pick_up",
-        description: "拾取当前段目标（须本段已完成 take_photo → detect_objects → go_to）。",
+        description: "拾取当前段目标 此段最好已经通过take_photo → detect_objects → go_to 到达目标点。",
         inputs: {},
         outputType: "string"
       },
