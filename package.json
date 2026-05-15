@@ -1,0 +1,23 @@
+{
+  "name": "tiny-agent",
+  "version": "0.1.0",
+  "description": "Token-conscious agent: smolagents loop + terminal trace UI",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx examples/basic.ts",
+    "example": "tsx examples/basic.ts",
+    "car": "tsx examples/car.ts"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^5.6.2",
+    "openai": "^6.35.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
+  }
+}

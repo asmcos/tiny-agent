@@ -1,0 +1,35 @@
+{
+  "activeProvider": "deepseek",
+  "providers": {
+    "ollama": {
+      "model": "llama3.2",
+      "temperature": 0.2,
+      "baseUrl": "http://127.0.0.1:11434"
+    },
+    "deepseek": {
+      "model": "deepseek-v4-flash",
+      "temperature": 0.2,
+      "maxTokens": 4096,
+      "apiKey": "sk-",
+      "baseUrl": "https://api.deepseek.com/v1"
+    }
+
+  },
+  "limits": {
+    "maxRounds": 12,
+    "maxHistoryItems": 24,
+    "summaryCharLimit": 800
+  },
+  "skill": {
+    "rootDir": ".tiny-agent/skills",
+    "summaryHeadLines": 4
+  },
+  "runtime": {
+    "planOnly": false,
+    "maxStepRounds": 20,
+    "contextWindow": 24,
+    "toolOutputMaxChars": 4000,
+    "maxPlanSteps": 24,
+    "planningInterval": 0
+  }
+}
