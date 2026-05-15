@@ -151,10 +151,20 @@ export class GridCarEnv {
     const targetHint = navigatingToPickup ? h0 : h1;
     const targetPos = navigatingToPickup ? est0 : est1;
 
+    const otherHint = navigatingToPickup ? h1 : h0;
+    const phaseNote =
+      navigatingToPickup && otherHint ?
+        `\n⚠️ 当前未携带：本帧只能识别第一段目标「${targetHint || "index0"}」。` +
+          `若要找「${otherHint}」，须先 pick_up 完成拾取后再 take_photo → detect_objects。\n`
+      : !navigatingToPickup && h0 ?
+        `\n（已携带：本帧识别第二段放置目标。）\n`
+      : "";
+
     const head =
       `【视觉识别 · 照片帧 #${this.photoFrameId}】以下为**估计坐标**（每次识别可有 ±1 格抖动，无精确地图）。\n` +
       `小车：(${car.row},${car.col}) 朝${car.heading}\n` +
       `本帧导航目标 index=${targetIndex}${targetHint ? `「${targetHint}」` : ""}：约 (${targetPos.row},${targetPos.col})\n` +
+      phaseNote +
       `请用该坐标调用 go_to；抵达后 pick_up 或 drop 即可（仿真不校验隐藏真值格）。`;
 
     const machine = {

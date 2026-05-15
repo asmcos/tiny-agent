@@ -7,11 +7,7 @@ import { AgentMaxStepsError } from "./errors";
 import { AgentLogger, LogLevel } from "./monitoring";
 import { OpenAIServerModel } from "./model";
 import { TraceStore, type TraceStep } from "./trace";
-import {
-  assistantTextAheadOfPlanStep,
-  buildPlanStepUserContent,
-  toolAheadOfPlanStep
-} from "./plan-step-scope";
+import { buildPlanStepUserContent } from "./plan-step-scope";
 import {
   candidateToolsForPlanStep,
   filterRegisteredTools,
@@ -345,6 +341,7 @@ export class ToolCallingAgent {
     let plannerSystem =
       "你是任务规划器。用简短中文列出剩余步骤（编号列表即可），不要调用工具。\n" +
       "尽量让每个规划步对应 toolkit 中**一种**可执行能力；一步一事，避免把移动与拾取/放下写在同一步。\n" +
+      "按用户任务拆步，勿编造用户未提到的目标；若任务含搬运到第二地点，第二段感知须在拾取之后（见 planner 附录）。\n" +
       (isFirstStep
         ? "针对完整任务做首轮拆解。\n"
         : `当前即将执行第 ${stepNumber} 步，请根据已有对话更新**剩余**计划，勿重复已完成部分。\n`);
@@ -512,7 +509,6 @@ export class ToolCallingAgent {
   ): Promise<string> {
     const parsed = steps[index]!;
     const total = steps.length;
-    const nextStep = steps[index + 1];
     const stepMessages: Msg[] = [...baseMessages];
     const allowedToolNames = this.restrictToolsPerPlanStep ? this.pickToolsForParsedStep(parsed) : [];
     const allowedNote =
@@ -572,23 +568,10 @@ export class ToolCallingAgent {
       stepMessages.push(toAssistantMessage(msg));
 
       if (!msg.tool_calls?.length) {
-        const text = (msg.content ?? "").trim();
         if (calledThisStep.size === 0 && round === 0) {
           stepMessages.push({
             role: "user",
             content: "请调用工具完成本步，不要仅用文字描述。"
-          });
-          round++;
-          continue;
-        }
-        if (
-          assistantTextAheadOfPlanStep(parsed.instruction, nextStep?.instruction, text)
-        ) {
-          stepMessages.push({
-            role: "user",
-            content:
-              `「${nextStep?.instruction ?? "下一步"}」尚未开始。请确认本步「${parsed.instruction}」是否已完成；` +
-              "若已完成，仅简短回复「本步完成」，不要描述或执行后续步骤。"
           });
           round++;
           continue;
@@ -616,18 +599,6 @@ export class ToolCallingAgent {
         if (tc.type !== "function" || !("function" in tc)) continue;
         const name = tc.function.name ?? "unknown";
         const argsRaw = tc.function.arguments ?? "{}";
-
-        if (
-          !this.restrictToolsPerPlanStep &&
-          toolAheadOfPlanStep(parsed.instruction, name)
-        ) {
-          const reject =
-            `Error: 「${name}」属于后续规划步骤，不是本步【${index + 1}/${total}】「${parsed.instruction}」。` +
-            (nextStep ? `请先做：${parsed.instruction}。下一步才是：${nextStep.instruction}。` : "");
-          stepMessages.push({ role: "tool", tool_call_id: tc.id, content: reject } as Msg);
-          this.pushTrace({ type: "tool", prompt: `${name}(${argsRaw})`, output: reject });
-          continue;
-        }
 
         if (this.restrictToolsPerPlanStep && !allowedToolNames.includes(name)) {
           const reject =

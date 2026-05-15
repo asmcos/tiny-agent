@@ -47,7 +47,7 @@ npx tsx examples/car.ts "把 index0 的物体搬到 index1"
 |------|------|
 | `src/agent.ts` | `ToolCallingAgent`：规划步 / ReAct 主循环 |
 | `src/plan-routing.ts` | 解析规划文档（`toolkit:`、编号行） |
-| `src/plan-step-scope.ts` | 规划步 user 文案、越步检测 |
+| `src/plan-step-scope.ts` | 规划步 user 文案（`buildPlanStepUserContent`） |
 | `src/model.ts` | `OpenAIServerModel` |
 | `src/config.ts` | 加载 `config.json` |
 | `src/trace.ts` / `src/ui.ts` | Trace 落盘与终端面板 |
