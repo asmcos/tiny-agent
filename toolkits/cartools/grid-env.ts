@@ -104,7 +104,7 @@ export class GridCarEnv {
   constructor(opts: GridEnvOptions = {}) {
     this.hints = [opts.hints?.[0]?.trim() ?? "", opts.hints?.[1]?.trim() ?? ""];
     this.size = opts.size ?? 6;
-    this.numObstacles = opts.numObstacles ?? 3;
+    this.numObstacles = Math.max(0, opts.numObstacles ?? 0);
     this.maxSteps = opts.maxSteps ?? 80;
     this.carPos = [0, 0];
     this.carDir = Direction.DOWN;
@@ -135,7 +135,9 @@ export class GridCarEnv {
     this.carPos = positions[0]!;
     this.pickupCell = positions[1]!;
     this.placeCell = positions[2]!;
-    this.obstacles = new Set(positions.slice(3).map((p) => `${p[0]},${p[1]}`));
+    this.obstacles = new Set(
+      positions.slice(3).map((p) => `${p[0]},${p[1]}`)
+    );
     this.carDir = randomInt(0, 3) as Direction;
     this.photoFrameId = 0;
     this.detectFrameId = 0;
@@ -264,46 +266,73 @@ export class GridCarEnv {
 
     const bearing = normalizeAngle(Number(bearingDeg));
     const distance = Math.max(0, Number(distanceM));
-    const moveDeg = directionToDeg(this.carDir) + bearing;
-    const moveDir = degToDirection(moveDeg);
+    const budget = Math.round(distance);
+    const goal = this.lastNavTarget;
 
     this.arrivedAtNavTarget = false;
-    const turnNote =
-      this.carDir === moveDir ?
-        `保持朝${DIR_ZH[moveDir]}`
-      : `转向 ${bearing}°（现朝${DIR_ZH[moveDir]}）`;
-
-    this.carDir = moveDir;
-    const steps = Math.round(distance);
-    const [dr, dc] = DIR_DELTA[moveDir];
-    let moved = 0;
     const pathNotes: string[] = [];
+    let moved = 0;
+    let detour = false;
 
-    for (let i = 0; i < steps; i++) {
-      if (this.done) break;
-      const limit = this.consumeStep();
-      if (limit) {
-        pathNotes.push(limit);
-        break;
+    const path = this.shortestPath(this.carPos, goal);
+    const straight = this.cellDistanceM(this.carPos, goal);
+    if (path && path.length > straight + 0.5) detour = true;
+
+    let turnNote = `保持朝${DIR_ZH[this.carDir]}`;
+
+    if (!path) {
+      pathNotes.push("⚠️ 本段目标暂不可达，停在当前位置。");
+    } else if (path.length === 0) {
+      pathNotes.push("已在目标附近。");
+    } else {
+      const segment = path.slice(0, budget);
+      if (segment.length > 0) {
+        const first = segment[0]!;
+        const headDir = this.deltaToDirection(
+          first[0] - this.carPos[0],
+          first[1] - this.carPos[1]
+        );
+        if (headDir !== null) {
+          turnNote =
+            this.carDir === headDir ?
+              `保持朝${DIR_ZH[headDir]}`
+            : `转向至${DIR_ZH[headDir]}（车载避障路径）`;
+          this.carDir = headDir;
+        }
       }
-      const nxt: [number, number] = [this.carPos[0] + dr, this.carPos[1] + dc];
-      if (!this.isValid(nxt)) {
-        pathNotes.push(`⚠️ 前进受阻于障碍，停在 (${this.carPos[0]},${this.carPos[1]})。`);
-        break;
+
+      for (const nxt of segment) {
+        if (this.done) break;
+        const limit = this.consumeStep();
+        if (limit) {
+          pathNotes.push(limit);
+          break;
+        }
+        const stepDir = this.deltaToDirection(
+          nxt[0] - this.carPos[0],
+          nxt[1] - this.carPos[1]
+        );
+        if (stepDir !== null) this.carDir = stepDir;
+        this.carPos = nxt;
+        moved++;
+        pathNotes.push(
+          detour ?
+            `避障前进 1m → 累计 ${moved}m`
+          : `前进 1m → 累计 ${moved}m`
+        );
       }
-      this.carPos = nxt;
-      moved++;
-      pathNotes.push(`前进 1m → 累计 ${moved}m`);
     }
 
     this.goFrameId = this.detectFrameId;
-    const remain = this.cellDistanceM(this.carPos, this.lastNavTarget);
-    this.arrivedAtNavTarget = remain <= 1.25 || moved >= steps;
+    const remain = this.cellDistanceM(this.carPos, goal);
+    this.arrivedAtNavTarget =
+      remain <= 1.25 || moved >= budget || (path !== null && path.length === 0);
 
+    const detourNote = detour && moved > 0 ? "（含车载避障绕行）" : "";
     const status =
       this.arrivedAtNavTarget ?
-        `✅ 已按 bearing=${bearing}°、distance=${distance}m 完成本段移动（实际 ${moved}m），距目标约 ${remain.toFixed(1)}m。可 ${this.carrying ? "drop" : "pick_up"}。`
-      : `⚠️ 已移动 ${moved}m，距识别目标仍约 ${remain.toFixed(1)}m，可再微调 go_to 或重新 detect。`;
+        `✅ 已按 bearing=${bearing}°、distance=${distance}m 完成本段移动（实际 ${moved}m${detourNote}），距目标约 ${remain.toFixed(1)}m。可 ${this.carrying ? "drop" : "pick_up"}。`
+      : `⚠️ 已移动 ${moved}m${detourNote}，距识别目标仍约 ${remain.toFixed(1)}m，可再 go_to 或 detect。`;
 
     return `${turnNote}，${status}\n${pathNotes.length ? pathNotes.map((n) => `  · ${n}`).join("\n") : ""}`;
   }
@@ -354,5 +383,55 @@ export class GridCarEnv {
   private isValid(pos: [number, number]): boolean {
     const [r, c] = pos;
     return r >= 0 && r < this.size && c >= 0 && c < this.size && !this.obstacles.has(`${r},${c}`);
+  }
+
+  private cellKey(pos: [number, number]): string {
+    return `${pos[0]},${pos[1]}`;
+  }
+
+  /** 车体避障：四向 BFS，不暴露给上层 agent 重新规划 */
+  private shortestPath(
+    from: [number, number],
+    to: [number, number]
+  ): [number, number][] | null {
+    if (from[0] === to[0] && from[1] === to[1]) return [];
+
+    const queue: [number, number][] = [from];
+    const prev = new Map<string, string | null>();
+    prev.set(this.cellKey(from), null);
+
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      if (cur[0] === to[0] && cur[1] === to[1]) {
+        const path: [number, number][] = [];
+        let k: string | null = this.cellKey(to);
+        while (k) {
+          const [r, c] = k.split(",").map(Number) as [number, number];
+          path.push([r, c]);
+          k = prev.get(k) ?? null;
+        }
+        path.reverse();
+        return path.slice(1);
+      }
+
+      for (const d of [Direction.UP, Direction.RIGHT, Direction.DOWN, Direction.LEFT]) {
+        const [dr, dc] = DIR_DELTA[d];
+        const nxt: [number, number] = [cur[0] + dr, cur[1] + dc];
+        if (!this.isValid(nxt)) continue;
+        const nk = this.cellKey(nxt);
+        if (prev.has(nk)) continue;
+        prev.set(nk, this.cellKey(cur));
+        queue.push(nxt);
+      }
+    }
+    return null;
+  }
+
+  private deltaToDirection(dr: number, dc: number): Direction | null {
+    if (dr === -1 && dc === 0) return Direction.UP;
+    if (dr === 1 && dc === 0) return Direction.DOWN;
+    if (dr === 0 && dc === 1) return Direction.RIGHT;
+    if (dr === 0 && dc === -1) return Direction.LEFT;
+    return null;
   }
 }

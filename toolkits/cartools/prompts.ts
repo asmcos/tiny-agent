@@ -4,6 +4,7 @@ export function buildCarDomainInstructionsCompact(): string {
   return (
     `小车导航用**方位角+距离**（相对车头）：detect 返回 bearing_deg、distance_m；` +
     `go_to(bearing_deg, distance_m) 与 detect 一致。0°=正前，顺时针为正；1m≈1格。` +
+    `go_to 由**车体自动避障**沿路径前进，遇障碍自行绕行，无需你重新规划。` +
     `流程：take_photo → detect_objects → go_to → pick_up/drop。未拾取只认 index0；拾取后再识别 index1。`
   );
 }
@@ -14,7 +15,7 @@ export function buildCarDomainInstructions(): string {
 ## 可用工具
 - **take_photo**：拍照缓存画面。
 - **detect_objects**：返回相对**当前车头**的 **bearing_deg**（°，0=正前，顺时针为正）与 **distance_m**（米）。
-- **go_to(bearing_deg, distance_m)**：先转向再沿该方向前进给定距离；参数须与最近一次 detect 一致。
+- **go_to(bearing_deg, distance_m)**：车体按识别结果导航并**自动避障**；参数须与最近一次 detect 一致。
 - **pick_up** / **drop**：本段 go_to 到位后调用。
 
 ## 仿真关键
@@ -42,6 +43,7 @@ export function buildToolkitPlannerHint(toolkit = "cars"): string {
     `- 未拾取前只识别 index=0；拾取后才识别 index=1。\n\n` +
     `## 输出格式\n` +
     `- 第一行：toolkit: ${toolkit}\n` +
-    `- 随后 \`1. …\` \`2. …\``
+    `- 每步一行，须带 [TAG]：\`[PERCEIVE]\` 感知 · \`[MOVE]\` 移动 · \`[PICKUP]\` 抓取 · \`[PLACE]\` 放置\n` +
+    `- 示例：\`1. [PERCEIVE] 拍照识别衣服，得到方位角与距离\``
   );
 }

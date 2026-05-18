@@ -13,7 +13,7 @@ import {
   buildPlanStepUserContent
 } from "./plan-step-scope";
 import { compressToolOutputForModel } from "./tool-output-compress";
-import { isPlanStepToolComplete } from "./plan-step-complete";
+import { isPlanStepToolComplete, type PlanStepHooks } from "./plan-step-complete";
 import {
   candidateToolsForPlanStep,
   filterRegisteredTools,
@@ -70,6 +70,8 @@ export type ToolCallingAgentOptions = {
   compactPlanExecution?: boolean;
   /** 跳过最终总结 LLM（compact 时默认 true） */
   skipFinalSummary?: boolean;
+  /** toolkit 规划步钩子（完成判定、提示、兜底等）；核心不含领域逻辑 */
+  planStepHooks?: PlanStepHooks;
 };
 
 type Msg = OpenAI.Chat.Completions.ChatCompletionMessageParam;
@@ -156,6 +158,7 @@ export class ToolCallingAgent {
   private readonly structuredPlanning: boolean;
   private readonly compactPlanExecution: boolean;
   private readonly skipFinalSummary: boolean;
+  private readonly planStepHooks?: PlanStepHooks;
 
   constructor(opts: ToolCallingAgentOptions) {
     let appConfig: AppConfig | undefined;
@@ -188,7 +191,7 @@ export class ToolCallingAgent {
     this.compactPlanExecution =
       opts.compactPlanExecution ?? rt?.compactPlanExecution ?? true;
     this.maxRoundsPerPlanStep =
-      opts.maxRoundsPerPlanStep ?? rt?.maxRoundsPerPlanStep ?? 3;
+      opts.maxRoundsPerPlanStep ?? rt?.maxRoundsPerPlanStep ?? 5;
     this.skipFinalSummary =
       opts.skipFinalSummary ??
       rt?.skipFinalSummary ??
@@ -199,6 +202,7 @@ export class ToolCallingAgent {
     this.structuredPlanning = rt?.structuredPlanning ?? false;
     this.planTagToolMap = { ...(opts.planTagToolGroups ?? {}) };
     this.completePlanStepAfterToolCalls = opts.completePlanStepAfterToolCalls ?? false;
+    this.planStepHooks = opts.planStepHooks;
     this.activeToolkit = opts.activeToolkit;
 
     this.trace = new TraceStore(opts.ui?.format);
@@ -538,7 +542,8 @@ export class ToolCallingAgent {
 
       const parsed = steps[i]!;
       const stepUserContent = buildPlanStepUserContent(parsed, i, steps, {
-        compact: this.compactPlanExecution
+        compact: this.compactPlanExecution,
+        stepHint: this.planStepHooks?.compactHint?.(parsed)
       });
 
       const stepMessages: Msg[] = this.compactPlanExecution
@@ -585,6 +590,13 @@ export class ToolCallingAgent {
     return filterRegisteredTools(names, (n) => this.tools.has(n));
   }
 
+  private stepToolsComplete(step: ParsedPlanStep, calledTools: ReadonlySet<string>): boolean {
+    return isPlanStepToolComplete(step, calledTools, {
+      custom: this.planStepHooks?.isToolComplete,
+      tagToolMap: this.planTagToolMap
+    });
+  }
+
   private async executeOnePlanStep(
     baseMessages: Msg[],
     steps: ParsedPlanStep[],
@@ -602,7 +614,8 @@ export class ToolCallingAgent {
       : "";
 
     const stepUserContent = buildPlanStepUserContent(parsed, index, steps, {
-      compact: this.compactPlanExecution
+      compact: this.compactPlanExecution,
+      stepHint: this.planStepHooks?.compactHint?.(parsed)
     });
     const toolsForChat = this.restrictToolsPerPlanStep ? allowedToolNames : undefined;
 
@@ -669,6 +682,22 @@ export class ToolCallingAgent {
           round++;
           continue;
         }
+        if (this.compactPlanExecution && this.stepToolsComplete(parsed, calledThisStep)) {
+          this.pushTrace({
+            type: "execute",
+            model: this.model.modelId,
+            prompt: parsed.rawLine,
+            output: msg.content ?? "（本步工具已满足，跳过文字确认轮）",
+            meta: {
+              execute_step: index + 1,
+              execute_step_total: total,
+              round: round + 1,
+              phase: "step_done_compact_after_tools",
+              tools_called: [...calledThisStep]
+            }
+          });
+          break;
+        }
         this.pushTrace({
           type: "execute",
           model: this.model.modelId,
@@ -712,14 +741,16 @@ export class ToolCallingAgent {
           content: this.toolContentForModel(name, output)
         } as Msg);
         this.pushTrace({ type: "tool", prompt: `${name}(${argsRaw})`, output });
+
+        const nudge = this.planStepHooks?.nudgeAfterTool?.(parsed, name, output);
+        if (nudge) {
+          stepMessages.push({ role: "user", content: nudge });
+        }
       }
 
       round++;
 
-      if (
-        this.compactPlanExecution &&
-        isPlanStepToolComplete(calledThisStep, parsed.instruction)
-      ) {
+      if (this.compactPlanExecution && this.stepToolsComplete(parsed, calledThisStep)) {
         this.pushTrace({
           type: "execute",
           model: this.model.modelId,
@@ -796,6 +827,41 @@ export class ToolCallingAgent {
       }
     }
 
+    if (this.compactPlanExecution && this.planStepHooks?.onExhausted) {
+      const lastTool = [...stepMessages]
+        .reverse()
+        .find((m) => m.role === "tool");
+      const lastOut = lastTool ? String(lastTool.content ?? "") : null;
+      const recovery = await this.planStepHooks.onExhausted(
+        parsed,
+        calledThisStep,
+        lastOut,
+        (name, argsRaw) => this.invokeTool(name, argsRaw)
+      );
+      if (recovery.handled && recovery.toolName && recovery.toolOutput) {
+        calledThisStep.add(recovery.toolName);
+        toolOutputs.push(
+          `${recovery.toolName}: ${this.toolContentForModel(recovery.toolName, recovery.toolOutput)}`
+        );
+        this.pushTrace({
+          type: "tool",
+          prompt: `${recovery.toolName}({})`,
+          output: recovery.toolOutput
+        });
+        this.pushTrace({
+          type: "execute",
+          model: this.model.modelId,
+          prompt: parsed.rawLine,
+          output: `（compact：本步轮次用尽，已兜底 ${recovery.toolName}）`,
+          meta: {
+            execute_step: index + 1,
+            execute_step_total: total,
+            phase: "step_done_compact_recovery"
+          }
+        });
+      }
+    }
+
     return toolOutputs.length > 0 ?
         `${parsed.instruction}\n${toolOutputs.join("\n")}`
       : parsed.instruction;
@@ -845,7 +911,11 @@ export class ToolCallingAgent {
       messages: trimmed,
       ...(withTools && toolDefs.length > 0 ? { tools: toOpenAITools(toolDefs) } : {})
     };
-    this.modelIoLogs.push({ ts: new Date().toISOString(), stage: `${stage}_req`, data: req });
+    this.modelIoLogs.push({
+      ts: new Date().toISOString(),
+      stage: `${stage}_req`,
+      data: structuredClone(req)
+    });
     const completion = await this.model.client.chat.completions.create(req);
     this.modelIoLogs.push({ ts: new Date().toISOString(), stage: `${stage}_res`, data: completion });
     return completion;

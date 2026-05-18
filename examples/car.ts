@@ -14,6 +14,11 @@ import {
   GridCarEnv,
   buildCarDomainInstructionsCompact,
   buildToolkitPlannerHint,
+  CAR_PLAN_TAG_TOOLS,
+  carCompactStepHint,
+  carNudgeAfterTool,
+  carPlanStepOnExhausted,
+  carPlanStepToolComplete,
   createCarTools
 } from "../toolkits/cartools";
 
@@ -53,7 +58,7 @@ function buildAgent(env: GridCarEnv): ToolCallingAgent {
       runtime: {
         ...fileConfig.runtime,
         compactPlanExecution: fileConfig.runtime?.compactPlanExecution ?? true,
-        maxRoundsPerPlanStep: fileConfig.runtime?.maxRoundsPerPlanStep ?? 3,
+        maxRoundsPerPlanStep: fileConfig.runtime?.maxRoundsPerPlanStep ?? 5,
         skipFinalSummary: fileConfig.runtime?.skipFinalSummary ?? true,
         structuredPlanning: fileConfig.runtime?.structuredPlanning ?? false
       },
@@ -68,8 +73,15 @@ function buildAgent(env: GridCarEnv): ToolCallingAgent {
     tools: createCarTools(env),
     activeToolkit: "cars",
     planStepMode: true,
-    restrictToolsPerPlanStep: false,
+    restrictToolsPerPlanStep: true,
+    planTagToolGroups: CAR_PLAN_TAG_TOOLS,
     planningInterval: undefined,
+    planStepHooks: {
+      compactHint: carCompactStepHint,
+      isToolComplete: carPlanStepToolComplete,
+      nudgeAfterTool: carNudgeAfterTool,
+      onExhausted: carPlanStepOnExhausted
+    },
     ui: { format: "panels" }
   });
 }
@@ -92,7 +104,8 @@ async function main(): Promise<void> {
   console.log("\n初始:", env.getStatusText());
   console.log("任务:", task, "\n");
 
-  const result = await buildAgent(env).run(task);
+  const agent = buildAgent(env);
+  const result = await agent.run(task);
   console.log("\n📝", result);
 
   if (!env.done) {

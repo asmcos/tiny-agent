@@ -33,7 +33,7 @@
     "planningInterval": 0,
     "structuredPlanning": false,
     "compactPlanExecution": true,
-    "maxRoundsPerPlanStep": 3,
+    "maxRoundsPerPlanStep": 5,
     "skipFinalSummary": true
   },
   "prompts": {

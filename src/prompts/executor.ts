@@ -14,4 +14,6 @@ export const PLAN_STEP_EXECUTOR_PRINCIPLES =
 
 /** 省 token：短 system，一步内可连续多工具，成功后即停 */
 export const PLAN_STEP_EXECUTOR_COMPACT =
-  "你是执行器：只完成当前【执行 k/n】；用工具落实，一步内可连续调用多个工具；勿做后续步骤；勿编造结果。";
+  "你是执行器：只完成当前【执行 k/n】；用 tool_calls 落实，一步内可连续多个工具；勿做后续步骤；勿编造结果。\n" +
+  "移动步：复用【已完成】里 detect 的 bearing/distance，只 go_to。\n" +
+  "放置步：go_to 提示「可 drop」后必须立刻 drop，不要重复感知。";

@@ -1,6 +1,10 @@
 import type { ParsedPlanStep } from "./types";
 
-export type PlanStepUserOpts = { compact?: boolean };
+export type PlanStepUserOpts = {
+  compact?: boolean;
+  /** toolkit 提供的本步短提示（无则不加） */
+  stepHint?: string;
+};
 
 /** 本步 user 消息：标明范围（compact 模式不要求无 tool_calls 确认轮） */
 export function buildPlanStepUserContent(
@@ -17,6 +21,8 @@ export function buildPlanStepUserContent(
     ? "【完成方式】用工具完成本步（感知=拍照+识别；移动=go_to(方位角,距离)；抓取=pick_up；放置=drop）；本步目标达成后自动进入下一步。"
     : "【完成方式】用工具落实本步；本步做完后**最后一轮不要再发起 tool_calls**（可一句确认）。";
 
+  const hintBlock = compact && opts?.stepHint ? `\n${opts.stepHint}` : "";
+
   const next = steps[index + 1];
   const nextPreview =
     compact || !next ? "" : `\n【后续步骤·勿现在执行】第 ${index + 2} 步：${next.instruction}`;
@@ -25,6 +31,7 @@ export function buildPlanStepUserContent(
     `【执行 ${index + 1}/${total}】${step.instruction}${tagLine}\n` +
     `【本步范围】只完成：${step.instruction}。不要提前做后续步骤中的动作。\n` +
     completeLine +
+    hintBlock +
     nextPreview
   );
 }
