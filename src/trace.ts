@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { jsonPathToHtmlPath, writeTraceHtmlFromSteps } from "./log-html";
 import { printRule, printTraceStep, type UiFormat } from "./ui";
 
 export type TraceStepType = "plan" | "execute" | "tool" | "model_turn";
@@ -162,6 +163,13 @@ export class TraceStore {
     const filePath = path.join(runDir, `${this.runId}.json`);
     const lines = this.steps.map((s) => JSON.stringify(s)).join("\n");
     fs.writeFileSync(filePath, lines ? `${lines}\n` : "", "utf8");
+    writeTraceHtmlFromSteps(this.steps, this.summarizeTokenUsage(), filePath, this.runId);
     return filePath;
+  }
+
+  /** 与最近一次 `flushToFile()` 同 runId 的 HTML 路径 */
+  htmlPathForRun(): string {
+    const runDir = path.resolve(process.cwd(), "runs");
+    return jsonPathToHtmlPath(path.join(runDir, `${this.runId}.json`));
   }
 }

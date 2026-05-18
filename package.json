@@ -8,7 +8,8 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx examples/basic.ts",
     "example": "tsx examples/basic.ts",
-    "car": "tsx examples/car.ts"
+    "car": "tsx examples/car.ts",
+    "logs:html": "tsx scripts/logs-html.ts"
   },
   "license": "MIT",
   "dependencies": {

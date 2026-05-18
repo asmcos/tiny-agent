@@ -14,6 +14,18 @@ import {
   legacyStepsFromRaw,
   parsePlanDocument
 } from "./plan-routing";
+import {
+  jsonPathToHtmlPath,
+  renderModelIoHtml,
+  writeHtmlFile
+} from "./log-html";
+import {
+  buildPlannerSystemPrompt,
+  extractExecutablePlan,
+  EXECUTOR_SYSTEM_PRINCIPLES,
+  PLAN_STEP_EXECUTOR_PRINCIPLES,
+  REACT_FINAL_ANSWER_HINT
+} from "./prompts";
 import type { AppConfig, ParsedPlanStep } from "./types";
 import { formatRunTokenUsagePlaintext, type UiFormat } from "./ui";
 
@@ -130,6 +142,7 @@ export class ToolCallingAgent {
   private readonly maxRoundsPerPlanStep: number;
   private readonly planOnly: boolean;
   private readonly restrictToolsPerPlanStep: boolean;
+  private readonly structuredPlanning: boolean;
 
   constructor(opts: ToolCallingAgentOptions) {
     let appConfig: AppConfig | undefined;
@@ -163,6 +176,7 @@ export class ToolCallingAgent {
 
     this.planStepMode = opts.planStepMode ?? false;
     this.restrictToolsPerPlanStep = opts.restrictToolsPerPlanStep ?? false;
+    this.structuredPlanning = rt?.structuredPlanning ?? true;
     this.planTagToolMap = { ...(opts.planTagToolGroups ?? {}) };
     this.completePlanStepAfterToolCalls = opts.completePlanStepAfterToolCalls ?? false;
     this.activeToolkit = opts.activeToolkit;
@@ -200,8 +214,7 @@ export class ToolCallingAgent {
     }
 
     const system =
-      "你是工具型智能体：通过调用工具完成任务，不要编造工具结果。\n" +
-      "完成时调用 final_answer，传入最终答复。\n" +
+      `${EXECUTOR_SYSTEM_PRINCIPLES}\n${REACT_FINAL_ANSWER_HINT}\n` +
       (this.instructions ? `\n${this.instructions}` : "");
 
     const messages: Msg[] = [
@@ -213,12 +226,13 @@ export class ToolCallingAgent {
 
     for (let step = 1; step <= this.maxSteps; step++) {
       if (this.shouldPlan(step)) {
-        const plan = await this.generatePlanningStep(task, messages, step === 1, step);
+        const planRaw = await this.generatePlanningStep(task, messages, step === 1, step);
+        const plan = this.planForExecution(planRaw, step === 1);
         this.pushTrace({
           type: "plan",
           model: this.model.modelId,
           prompt: step === 1 ? task : `[replan @ step ${step}] ${task}`,
-          output: plan,
+          output: planRaw,
           meta: {
             mid_run_replan: step > 1,
             replan_at_execute_step: step > 1 ? step : undefined,
@@ -338,19 +352,13 @@ export class ToolCallingAgent {
     completedPlanSteps?: ParsedPlanStep[],
     remainingStepBudget?: number
   ): Promise<string> {
-    let plannerSystem =
-      "你是任务规划器。用简短中文列出剩余步骤（编号列表即可），不要调用工具。\n" +
-      "尽量让每个规划步对应 toolkit 中**一种**可执行能力；一步一事，避免把移动与拾取/放下写在同一步。\n" +
-      "按用户任务拆步，勿编造用户未提到的目标；若任务含搬运到第二地点，第二段感知须在拾取之后（见 planner 附录）。\n" +
-      (isFirstStep
-        ? "针对完整任务做首轮拆解。\n"
-        : `当前即将执行第 ${stepNumber} 步，请根据已有对话更新**剩余**计划，勿重复已完成部分。\n`);
-    if (this.activeToolkit) {
-      plannerSystem += `第一行须为 toolkit: ${this.activeToolkit}\n`;
-    }
-    if (this.plannerExtra) {
-      plannerSystem += `\n${this.plannerExtra}`;
-    }
+    const plannerSystem = buildPlannerSystemPrompt({
+      isFirstStep,
+      stepNumber,
+      activeToolkit: this.activeToolkit,
+      structuredPlanning: this.structuredPlanning,
+      extra: this.plannerExtra || undefined
+    });
 
     const completedNote =
       completedPlanSteps?.length ?
@@ -376,6 +384,11 @@ export class ToolCallingAgent {
     return completion.choices[0]?.message?.content?.trim() ?? "";
   }
 
+  private planForExecution(planRaw: string, isFirstStep: boolean): string {
+    if (!this.structuredPlanning || !isFirstStep) return planRaw;
+    return extractExecutablePlan(planRaw) || planRaw;
+  }
+
   private async invokeTool(name: string, argsRaw: string): Promise<string> {
     const t = this.tools.get(name);
     if (!t) return `Error: unknown tool '${name}'`;
@@ -388,12 +401,13 @@ export class ToolCallingAgent {
   }
 
   private async runWithPlanSteps(task: string): Promise<string> {
-    const plan = await this.generatePlanningStep(task, [], true, 1);
+    const planRaw = await this.generatePlanningStep(task, [], true, 1);
+    const plan = this.planForExecution(planRaw, true);
     this.pushTrace({
       type: "plan",
       model: this.model.modelId,
       prompt: task,
-      output: plan,
+      output: planRaw,
       meta: { planning_interval: this.planningInterval ?? null, active_toolkit: this.activeToolkit ?? null }
     });
 
@@ -431,11 +445,8 @@ export class ToolCallingAgent {
       {
         role: "system",
         content:
-          "你是**执行器**（不是规划器）：只落实「当前这一条用户消息」里的动作，必须按需调用工具完成它。\n" +
+          `${PLAN_STEP_EXECUTOR_PRINCIPLES}\n` +
           executorReplanNote +
-          "你必须调用工具来执行当前步骤，不要只输出描述文本而不调用工具。\n" +
-          "每条【执行 k/n】只对应规划第 k 步：即使已抵达目标，也不要在本步拾取/放下/再拍照，除非本步描述明确要求。\n" +
-          "严格按当前步骤执行；可以调用工具，但绝不能伪造工具返回。\n" +
           (this.restrictToolsPerPlanStep ?
             "本运行已开启按步限工具：仅使用当前步骤允许列表中的工具。\n"
           : "本运行不限制每步工具种类：根据当前步骤描述自行选用合适工具。\n") +
@@ -787,12 +798,17 @@ export class ToolCallingAgent {
 
   private finish(answer: string): string {
     const traceFile = this.trace.flushToFile();
+    const traceHtml = this.trace.htmlPathForRun();
     const ioFile = this.flushModelIoLog();
     if (this.traceBatch) this.trace.print();
     else this.trace.printEndMarker();
 
     const usage = formatRunTokenUsagePlaintext(this.trace.summarizeTokenUsage());
-    return `${answer}\n\n本次 token 消耗：\n${usage}\n\n(trace: ${traceFile})\n(model_io: ${ioFile})`;
+    return (
+      `${answer}\n\n本次 token 消耗：\n${usage}\n\n` +
+      `(trace: ${traceFile})\n(trace_html: ${traceHtml})\n` +
+      `(model_io: ${ioFile})\n(model_io_html: ${jsonPathToHtmlPath(ioFile)})`
+    );
   }
 
   private flushModelIoLog(): string {
@@ -801,6 +817,8 @@ export class ToolCallingAgent {
     const filePath = path.join(runDir, `${this.modelIoRunId}.model-io.json`);
     const lines = this.modelIoLogs.map((x) => JSON.stringify(x)).join("\n");
     fs.writeFileSync(filePath, lines ? `${lines}\n` : "", "utf8");
+    const html = renderModelIoHtml(this.modelIoLogs, { sourceFile: filePath });
+    writeHtmlFile(jsonPathToHtmlPath(filePath), html);
     return filePath;
   }
 }

@@ -44,6 +44,8 @@ export interface AppConfig {
     toolOutputMaxChars: number;
     maxPlanSteps: number;
     planningInterval?: number;
+    /** 为 true 时规划器首轮输出 Facts survey + Plan（默认 true） */
+    structuredPlanning?: boolean;
   };
   prompts?: {
     planner?: string;

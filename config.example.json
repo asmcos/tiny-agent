@@ -30,6 +30,11 @@
     "contextWindow": 24,
     "toolOutputMaxChars": 4000,
     "maxPlanSteps": 24,
-    "planningInterval": 0
+    "planningInterval": 0,
+    "structuredPlanning": true
+  },
+  "prompts": {
+    "planner": "",
+    "executor": ""
   }
 }

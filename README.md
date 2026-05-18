@@ -11,7 +11,7 @@
   - **规划步模式**（`planStepMode: true`）：首轮规划 → 按编号逐步执行；每步由模型**自行选工具**，框架不替模型锁工具（见 `examples/car.ts`）。
 - **配置**：根目录 `config.json`（与 origin 同形）：`activeProvider`、`providers`、`runtime`、`prompts`。
 - **模型**：DeepSeek / Ollama（OpenAI 兼容 Chat Completions）；支持 `reasoning_content` 回传（thinking 模型）。
-- **可观察**：`TraceStore` 终端面板（`ui.format: "panels"`）；`runs/*.json` trace、`runs/*.model-io.json` 请求审计。
+- **可观察**：`TraceStore` 终端面板（`ui.format: "panels"`）；`runs/*.json` trace、`runs/*.model-io.json` 请求审计；同目录自动生成 **`*.html`** 便于浏览器查看。
 - **领域示例**：`toolkits/cartools` 网格小车仿真（拍照 → 识别 → 导航 → 拾放）。
 
 ---
@@ -38,6 +38,19 @@ npx tsx examples/car.ts "把 index0 的物体搬到 index1"
 |------|------|
 | `TINY_AGENT_CONFIG` | 指定 `config.json` 路径 |
 | `TINY_AGENT_TRACE_BATCH=1` | 跑完再一次性打印 trace |
+
+将已有 JSON 转为 HTML：
+
+```bash
+npm run logs:html              # 转换 runs/ 下全部 .json
+npm run logs:html -- --all     # 同上
+npm run logs:html -- runs/1730000000000.json
+```
+
+每次 run 结束会**自动生成** `trace_html` / `model_io_html`（与 JSON 同目录），用浏览器打开即可。
+
+- **Trace HTML**：每步左右分栏（输入 prompt | 输出 output），Markdown 渲染。
+- **Model I/O HTML**：请求/响应左右对照；消息内 `content`、`reasoning_content` 分块展示，并转为格式化 Markdown HTML。
 
 ---
 
@@ -81,8 +94,19 @@ npx tsx examples/car.ts "把 index0 的物体搬到 index1"
 | `runtime.maxPlanSteps` | 最多执行几条规划步 |
 | `runtime.planningInterval` | ReAct 模式下中途 replan 间隔；`0` 表示仅首轮规划 |
 | `runtime.planOnly` | 只出规划、不执行 |
+| `runtime.structuredPlanning` | 首轮规划先输出 Facts survey + Plan，再解析编号步骤（默认 `true`） |
 
 `config.json` 已在 `.gitignore`，勿提交 API Key。
+
+### 规划提示分层（`src/prompts/`）
+
+| 层级 | 内容 | 何时生效 |
+|------|------|----------|
+| **短版原则** | `PLANNER_SYSTEM_PRINCIPLES` / `EXECUTOR_SYSTEM_PRINCIPLES` | 始终写入对应角色的 system |
+| **结构化附录** | `PLANNER_STRUCTURED_APPENDIX`（1.1–1.3 + 2. Plan + `<end_plan>`） | `structuredPlanning: true` 且首轮规划 |
+| **领域附录** | `config.prompts.planner` / `executor`（如 `toolkits/cartools/prompts.ts`） | 按应用拼装 |
+
+结构化输出经 `extractExecutablePlan` 提取 `toolkit:` 与 `1.` `2.` 行后再交给 `plan-routing`；trace 仍保留模型原文。关闭结构化：`"structuredPlanning": false`。
 
 ---
 
