@@ -12,7 +12,7 @@ import { ToolCallingAgent } from "../src";
 import { loadConfig, tryLoadConfig } from "../src/config";
 import {
   GridCarEnv,
-  buildCarDomainInstructions,
+  buildCarDomainInstructionsCompact,
   buildToolkitPlannerHint,
   createCarTools
 } from "../toolkits/cartools";
@@ -46,10 +46,17 @@ async function readInteractiveTask(): Promise<string> {
 
 function buildAgent(env: GridCarEnv): ToolCallingAgent {
   const fileConfig = loadConfig();
-  const domain = buildCarDomainInstructions();
+  const domain = buildCarDomainInstructionsCompact();
   return new ToolCallingAgent({
     config: {
       ...fileConfig,
+      runtime: {
+        ...fileConfig.runtime,
+        compactPlanExecution: fileConfig.runtime?.compactPlanExecution ?? true,
+        maxRoundsPerPlanStep: fileConfig.runtime?.maxRoundsPerPlanStep ?? 3,
+        skipFinalSummary: fileConfig.runtime?.skipFinalSummary ?? true,
+        structuredPlanning: fileConfig.runtime?.structuredPlanning ?? false
+      },
       prompts: {
         ...(fileConfig.prompts ?? {}),
         planner: [fileConfig.prompts?.planner, buildToolkitPlannerHint("cars")]

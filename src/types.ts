@@ -44,8 +44,14 @@ export interface AppConfig {
     toolOutputMaxChars: number;
     maxPlanSteps: number;
     planningInterval?: number;
-    /** 为 true 时规划器首轮输出 Facts survey + Plan（默认 true） */
+    /** 为 true 时规划器首轮输出 Facts survey + Plan（默认 false，省 token） */
     structuredPlanning?: boolean;
+    /** 规划步模式：每步独立短上下文、工具成功后即结束本步（默认 true） */
+    compactPlanExecution?: boolean;
+    /** 每个规划步内最多 LLM 轮数（默认 3） */
+    maxRoundsPerPlanStep?: number;
+    /** 跳过最终总结 LLM 调用（compact 时默认 true） */
+    skipFinalSummary?: boolean;
   };
   prompts?: {
     planner?: string;

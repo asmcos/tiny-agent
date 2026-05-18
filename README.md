@@ -12,7 +12,7 @@
 - **配置**：根目录 `config.json`（与 origin 同形）：`activeProvider`、`providers`、`runtime`、`prompts`。
 - **模型**：DeepSeek / Ollama（OpenAI 兼容 Chat Completions）；支持 `reasoning_content` 回传（thinking 模型）。
 - **可观察**：`TraceStore` 终端面板（`ui.format: "panels"`）；`runs/*.json` trace、`runs/*.model-io.json` 请求审计；同目录自动生成 **`*.html`** 便于浏览器查看。
-- **领域示例**：`toolkits/cartools` 网格小车仿真（拍照 → 识别 → 导航 → 拾放）。
+- **领域示例**：`toolkits/cartools` 小车仿真（拍照 → 识别方位角+距离 → go_to → 拾放）。
 
 ---
 
@@ -94,7 +94,10 @@ npm run logs:html -- runs/1730000000000.json
 | `runtime.maxPlanSteps` | 最多执行几条规划步 |
 | `runtime.planningInterval` | ReAct 模式下中途 replan 间隔；`0` 表示仅首轮规划 |
 | `runtime.planOnly` | 只出规划、不执行 |
-| `runtime.structuredPlanning` | 首轮规划先输出 Facts survey + Plan，再解析编号步骤（默认 `true`） |
+| `runtime.structuredPlanning` | 首轮规划先输出 Facts survey + Plan（默认 `false`，省 token） |
+| `runtime.compactPlanExecution` | 规划步：每步短上下文、工具成功即停（默认 `true`） |
+| `runtime.maxRoundsPerPlanStep` | 每个规划步内最多 LLM 轮数（默认 `3`） |
+| `runtime.skipFinalSummary` | 跳过最终总结 LLM（compact 时默认 `true`） |
 
 `config.json` 已在 `.gitignore`，勿提交 API Key。
 
@@ -106,7 +109,9 @@ npm run logs:html -- runs/1730000000000.json
 | **结构化附录** | `PLANNER_STRUCTURED_APPENDIX`（1.1–1.3 + 2. Plan + `<end_plan>`） | `structuredPlanning: true` 且首轮规划 |
 | **领域附录** | `config.prompts.planner` / `executor`（如 `toolkits/cartools/prompts.ts`） | 按应用拼装 |
 
-结构化输出经 `extractExecutablePlan` 提取 `toolkit:` 与 `1.` `2.` 行后再交给 `plan-routing`；trace 仍保留模型原文。关闭结构化：`"structuredPlanning": false`。
+结构化输出经 `extractExecutablePlan` 提取 `toolkit:` 与 `1.` `2.` 行后再交给 `plan-routing`；trace 仍保留模型原文。
+
+**省 token（默认已开）**：`compactPlanExecution` 每步只发 system+任务+已完成摘要+当前步；工具结果压缩回传；工具成功后不再多一轮「确认」；`skipFinalSummary` 省略总结 LLM。简单取放任务可从约 3 万 token 降到约 8k～15k（视模型与规划步数而定）。
 
 ---
 
@@ -163,7 +168,7 @@ new ToolCallingAgent({
 1. 用户输入任务（交互或 argv）。
 2. 规划 LLM 输出 `toolkit: cars` + 编号步骤（步数随任务变化）。
 3. 对每一步下发 `【执行 k/n】…`，模型调用 `take_photo` / `detect_objects` / `go_to` / `pick_up` / `drop`。
-4. 仿真规则见 `toolkits/cartools/grid-env.ts`（识别坐标带噪声；`go_to` 完成后拾放即成功）。
+4. 仿真规则见 `toolkits/cartools/grid-env.ts`：`detect` 返回相对车头的 `bearing_deg` + `distance_m`；`go_to` 按该极坐标移动，到位后可拾放。
 
 ---
 

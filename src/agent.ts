@@ -7,7 +7,13 @@ import { AgentMaxStepsError } from "./errors";
 import { AgentLogger, LogLevel } from "./monitoring";
 import { OpenAIServerModel } from "./model";
 import { TraceStore, type TraceStep } from "./trace";
-import { buildPlanStepUserContent } from "./plan-step-scope";
+import {
+  briefStepSummary,
+  buildCompactStepUserMessage,
+  buildPlanStepUserContent
+} from "./plan-step-scope";
+import { compressToolOutputForModel } from "./tool-output-compress";
+import { isPlanStepToolComplete } from "./plan-step-complete";
 import {
   candidateToolsForPlanStep,
   filterRegisteredTools,
@@ -23,6 +29,7 @@ import {
   buildPlannerSystemPrompt,
   extractExecutablePlan,
   EXECUTOR_SYSTEM_PRINCIPLES,
+  PLAN_STEP_EXECUTOR_COMPACT,
   PLAN_STEP_EXECUTOR_PRINCIPLES,
   REACT_FINAL_ANSWER_HINT
 } from "./prompts";
@@ -57,8 +64,12 @@ export type ToolCallingAgentOptions = {
   planTagToolGroups?: Record<string, readonly string[]>;
   /** restrict 模式下：带 [TAG] 且成功调用允许工具后即进入下一步 */
   completePlanStepAfterToolCalls?: boolean;
-  /** 每规划步最多 LLM 轮数（默认 config.runtime.maxStepRounds） */
+  /** 每规划步最多 LLM 轮数（默认 config.runtime.maxRoundsPerPlanStep 或 3） */
   maxRoundsPerPlanStep?: number;
+  /** 规划步：每步短上下文 + 工具成功即停（默认 true） */
+  compactPlanExecution?: boolean;
+  /** 跳过最终总结 LLM（compact 时默认 true） */
+  skipFinalSummary?: boolean;
 };
 
 type Msg = OpenAI.Chat.Completions.ChatCompletionMessageParam;
@@ -143,6 +154,8 @@ export class ToolCallingAgent {
   private readonly planOnly: boolean;
   private readonly restrictToolsPerPlanStep: boolean;
   private readonly structuredPlanning: boolean;
+  private readonly compactPlanExecution: boolean;
+  private readonly skipFinalSummary: boolean;
 
   constructor(opts: ToolCallingAgentOptions) {
     let appConfig: AppConfig | undefined;
@@ -172,11 +185,18 @@ export class ToolCallingAgent {
     this.contextWindow = opts.contextWindow ?? rt?.contextWindow ?? 24;
     this.toolOutputMaxChars = opts.toolOutputMaxChars ?? rt?.toolOutputMaxChars ?? 4000;
     this.planOnly = rt?.planOnly ?? false;
-    this.maxRoundsPerPlanStep = opts.maxRoundsPerPlanStep ?? rt?.maxStepRounds ?? 5;
+    this.compactPlanExecution =
+      opts.compactPlanExecution ?? rt?.compactPlanExecution ?? true;
+    this.maxRoundsPerPlanStep =
+      opts.maxRoundsPerPlanStep ?? rt?.maxRoundsPerPlanStep ?? 3;
+    this.skipFinalSummary =
+      opts.skipFinalSummary ??
+      rt?.skipFinalSummary ??
+      (this.compactPlanExecution ? true : false);
 
     this.planStepMode = opts.planStepMode ?? false;
     this.restrictToolsPerPlanStep = opts.restrictToolsPerPlanStep ?? false;
-    this.structuredPlanning = rt?.structuredPlanning ?? true;
+    this.structuredPlanning = rt?.structuredPlanning ?? false;
     this.planTagToolMap = { ...(opts.planTagToolGroups ?? {}) };
     this.completePlanStepAfterToolCalls = opts.completePlanStepAfterToolCalls ?? false;
     this.activeToolkit = opts.activeToolkit;
@@ -400,6 +420,39 @@ export class ToolCallingAgent {
     }
   }
 
+  private toolContentForModel(name: string, fullOutput: string): string {
+    if (!this.compactPlanExecution) return fullOutput;
+    return compressToolOutputForModel(name, fullOutput);
+  }
+
+  private buildPlanExecutorSystem(executorReplanNote: string): string {
+    const principles = this.compactPlanExecution
+      ? PLAN_STEP_EXECUTOR_COMPACT
+      : PLAN_STEP_EXECUTOR_PRINCIPLES;
+    const restrictNote = this.restrictToolsPerPlanStep
+      ? "本运行已开启按步限工具：仅使用当前步骤允许列表中的工具。\n"
+      : this.compactPlanExecution
+        ? ""
+        : "本运行不限制每步工具种类：根据当前步骤描述自行选用合适工具。\n";
+    return (
+      `${principles}\n` +
+      executorReplanNote +
+      restrictNote +
+      (this.instructions ? `\n${this.instructions}` : "")
+    );
+  }
+
+  private planContextForReplan(task: string, completedSummaries: readonly string[]): Msg[] {
+    const msgs: Msg[] = [{ role: "user", content: task }];
+    if (completedSummaries.length > 0) {
+      msgs.push({
+        role: "user",
+        content: `【已完成步骤】\n${completedSummaries.map((s, i) => `${i + 1}. ${s}`).join("\n")}`
+      });
+    }
+    return msgs;
+  }
+
   private async runWithPlanSteps(task: string): Promise<string> {
     const planRaw = await this.generatePlanningStep(task, [], true, 1);
     const plan = this.planForExecution(planRaw, true);
@@ -441,28 +494,24 @@ export class ToolCallingAgent {
       ? `若已开启 planning_interval（每 ${this.planningInterval} 步），执行中途可能自动更新后续步骤。\n`
       : "本流程默认不在执行中途自动重新规划；步骤列表在首轮规划后固定。\n";
 
+    const executorSystem = this.buildPlanExecutorSystem(executorReplanNote);
     const baseMessages: Msg[] = [
-      {
-        role: "system",
-        content:
-          `${PLAN_STEP_EXECUTOR_PRINCIPLES}\n` +
-          executorReplanNote +
-          (this.restrictToolsPerPlanStep ?
-            "本运行已开启按步限工具：仅使用当前步骤允许列表中的工具。\n"
-          : "本运行不限制每步工具种类：根据当前步骤描述自行选用合适工具。\n") +
-          (this.instructions ? `\n${this.instructions}` : "")
-      },
+      { role: "system", content: executorSystem },
       { role: "user", content: task }
     ];
+    const completedSummaries: string[] = [];
 
     let i = 0;
     while (i < steps.length) {
       const stepNumber = i + 1;
       if (this.shouldReplanBeforePlanStep(stepNumber)) {
         const remainingBudget = maxPlanSteps ? Math.max(0, maxPlanSteps - i) : undefined;
+        const replanHistory = this.compactPlanExecution
+          ? this.planContextForReplan(task, completedSummaries)
+          : baseMessages;
         const replan = await this.generatePlanningStep(
           task,
-          baseMessages,
+          replanHistory,
           false,
           stepNumber,
           steps.slice(0, i),
@@ -487,17 +536,40 @@ export class ToolCallingAgent {
         }
       }
 
-      const stepBrief = await this.executeOnePlanStep(baseMessages, steps, i);
+      const parsed = steps[i]!;
+      const stepUserContent = buildPlanStepUserContent(parsed, i, steps, {
+        compact: this.compactPlanExecution
+      });
+
+      const stepMessages: Msg[] = this.compactPlanExecution
+        ? [
+            { role: "system", content: executorSystem },
+            {
+              role: "user",
+              content: buildCompactStepUserMessage(task, completedSummaries, stepUserContent)
+            }
+          ]
+        : [...baseMessages, { role: "user", content: stepUserContent }];
+
+      const stepBrief = await this.executeOnePlanStep(stepMessages, steps, i);
       if (stepBrief) {
-        baseMessages.push({
-          role: "user",
-          content: `【步骤 ${i + 1} 已完成】${stepBrief}`
-        });
+        if (this.compactPlanExecution) {
+          completedSummaries.push(briefStepSummary(stepBrief));
+        } else {
+          baseMessages.push({
+            role: "user",
+            content: `【步骤 ${i + 1} 已完成】${briefStepSummary(stepBrief, 400)}`
+          });
+        }
       }
       i++;
     }
 
-    const summary = await this.generateFinalSummary(task);
+    const summary = this.skipFinalSummary
+      ? completedSummaries.length > 0
+        ? `已完成：\n${completedSummaries.map((s, n) => `${n + 1}. ${s}`).join("\n")}`
+        : "任务已执行完毕。"
+      : await this.generateFinalSummary(task);
     this.logger.logFinalAnswer(summary);
     return this.finish(summary);
   }
@@ -529,13 +601,23 @@ export class ToolCallingAgent {
         : "\n（本步无 [TAG]，不限工具；请根据描述自行选择。）"
       : "";
 
-    const stepUserContent = buildPlanStepUserContent(parsed, index, steps) + allowedNote;
+    const stepUserContent = buildPlanStepUserContent(parsed, index, steps, {
+      compact: this.compactPlanExecution
+    });
     const toolsForChat = this.restrictToolsPerPlanStep ? allowedToolNames : undefined;
 
-    stepMessages.push({
-      role: "user",
-      content: stepUserContent
-    });
+    if (allowedNote) {
+      for (let j = stepMessages.length - 1; j >= 0; j--) {
+        const m = stepMessages[j]!;
+        if (m.role === "user") {
+          stepMessages[j] = {
+            role: "user",
+            content: `${String(m.content ?? "")}${allowedNote}`
+          };
+          break;
+        }
+      }
+    }
 
     const toolOutputs: string[] = [];
 
@@ -623,12 +705,36 @@ export class ToolCallingAgent {
         ranAllowedTool = true;
         const output = await this.invokeTool(name, argsRaw);
         calledThisStep.add(name);
-        toolOutputs.push(`${name}: ${output.slice(0, 500)}`);
-        stepMessages.push({ role: "tool", tool_call_id: tc.id, content: output } as Msg);
+        toolOutputs.push(`${name}: ${this.toolContentForModel(name, output)}`);
+        stepMessages.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: this.toolContentForModel(name, output)
+        } as Msg);
         this.pushTrace({ type: "tool", prompt: `${name}(${argsRaw})`, output });
       }
 
       round++;
+
+      if (
+        this.compactPlanExecution &&
+        isPlanStepToolComplete(calledThisStep, parsed.instruction)
+      ) {
+        this.pushTrace({
+          type: "execute",
+          model: this.model.modelId,
+          prompt: parsed.rawLine,
+          output: `（compact：本步工具已满足 [${[...calledThisStep].join(", ")}]，进入下一步）`,
+          meta: {
+            execute_step: index + 1,
+            execute_step_total: total,
+            round,
+            phase: "step_done_compact_after_tools",
+            tools_called: [...calledThisStep]
+          }
+        });
+        break;
+      }
 
       if (!this.restrictToolsPerPlanStep) {
         continue;

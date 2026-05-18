@@ -31,7 +31,10 @@
     "toolOutputMaxChars": 4000,
     "maxPlanSteps": 24,
     "planningInterval": 0,
-    "structuredPlanning": true
+    "structuredPlanning": false,
+    "compactPlanExecution": true,
+    "maxRoundsPerPlanStep": 3,
+    "skipFinalSummary": true
   },
   "prompts": {
     "planner": "",

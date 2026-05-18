@@ -1,4 +1,4 @@
-/** 网格小车仿真：识别坐标带噪声，go_to 抵达后 pick_up/drop 即成功（不要求与隐藏真值格重合） */
+/** 小车仿真：对外用相对方位角 + 距离；内部仍用网格做运动与碰撞 */
 
 export enum Direction {
   UP = 0,
@@ -9,12 +9,12 @@ export enum Direction {
 
 export const DIR_ZH = ["北", "东", "南", "西"] as const;
 
-const GRID_DIRS: [number, number][] = [
-  [-1, 0],
-  [1, 0],
-  [0, -1],
-  [0, 1]
-];
+const DIR_DELTA: Record<Direction, [number, number]> = {
+  [Direction.UP]: [-1, 0],
+  [Direction.RIGHT]: [0, 1],
+  [Direction.DOWN]: [1, 0],
+  [Direction.LEFT]: [0, -1]
+};
 
 function randomInt(min: number, max: number): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
@@ -28,6 +28,49 @@ function randomSample<T>(arr: T[], k: number): T[] {
   }
   return copy.slice(0, k);
 }
+
+function normalizeAngle(deg: number): number {
+  let a = deg % 360;
+  if (a > 180) a -= 360;
+  if (a <= -180) a += 360;
+  return a;
+}
+
+function directionToDeg(d: Direction): number {
+  switch (d) {
+    case Direction.UP:
+      return 0;
+    case Direction.RIGHT:
+      return 90;
+    case Direction.DOWN:
+      return 180;
+    case Direction.LEFT:
+      return 270;
+    default:
+      return 0;
+  }
+}
+
+function degToDirection(deg: number): Direction {
+  const n = ((Math.round(deg / 90) * 90) % 360 + 360) % 360;
+  switch (n) {
+    case 0:
+      return Direction.UP;
+    case 90:
+      return Direction.RIGHT;
+    case 180:
+      return Direction.DOWN;
+    case 270:
+      return Direction.LEFT;
+    default:
+      return Direction.UP;
+  }
+}
+
+export type PolarReading = {
+  bearing_deg: number;
+  distance_m: number;
+};
 
 export type GridEnvOptions = {
   hints?: [string, string];
@@ -44,7 +87,6 @@ export class GridCarEnv {
 
   carPos: [number, number];
   carDir: Direction;
-  /** 仿真内部真值（不对 Agent 暴露精确拾放判定） */
   pickupCell: [number, number];
   placeCell: [number, number];
   carrying: boolean;
@@ -55,8 +97,9 @@ export class GridCarEnv {
   private photoFrameId = 0;
   private detectFrameId = 0;
   private goFrameId = 0;
-  /** 本段导航是否已 go_to 到「当前目标」的识别坐标 */
   private arrivedAtNavTarget = false;
+  /** 本段 detect 估计的目标格（内部），用于判断 go_to 是否到位 */
+  private lastNavTarget: [number, number] | null = null;
 
   constructor(opts: GridEnvOptions = {}) {
     this.hints = [opts.hints?.[0]?.trim() ?? "", opts.hints?.[1]?.trim() ?? ""];
@@ -79,6 +122,7 @@ export class GridCarEnv {
     this.done = false;
     this.carrying = false;
     this.arrivedAtNavTarget = false;
+    this.lastNavTarget = null;
 
     const allCells: [number, number][] = [];
     for (let r = 0; r < this.size; r++) {
@@ -102,32 +146,55 @@ export class GridCarEnv {
 
   takePhoto(): string {
     this.photoFrameId++;
-    this.arrivedAtNavTarget = false;
     return (
-      `📷 车载摄像头已拍照（帧 #${this.photoFrameId}，场地 ${this.size}×${this.size}，行列从 0 起）。` +
-      `画面已缓存；请紧接着调用 detect_objects（识别结果为带噪声的估计坐标，非精确地图）。`
+      `📷 车载摄像头已拍照（帧 #${this.photoFrameId}）。` +
+      `画面已缓存；请紧接着 detect_objects（返回相对车体的**方位角 + 距离**）。`
     );
   }
 
-  /** 在真值附近随机偏移 0~1 格，模拟视觉估计 */
-  private noisyReport(truePos: [number, number]): { row: number; col: number } {
+  private cellDistanceM(a: [number, number], b: [number, number]): number {
+    const dr = b[0] - a[0];
+    const dc = b[1] - a[1];
+    return Math.sqrt(dr * dr + dc * dc);
+  }
+
+  /** 从车体坐标系：0°=正前方，顺时针为正，得到目标相对读数 */
+  private polarFromCells(from: [number, number], to: [number, number], heading: Direction): PolarReading {
+    const dr = to[0] - from[0];
+    const dc = to[1] - from[1];
+    const distance_m = Math.sqrt(dr * dr + dc * dc);
+    const absoluteDeg = (Math.atan2(dc, -dr) * 180) / Math.PI;
+    const bearing_deg = normalizeAngle(absoluteDeg - directionToDeg(heading));
+    return {
+      bearing_deg: Math.round(bearing_deg * 10) / 10,
+      distance_m: Math.round(distance_m * 10) / 10
+    };
+  }
+
+  private noisyTargetCell(truePos: [number, number]): [number, number] {
     for (let attempt = 0; attempt < 10; attempt++) {
       const jr = Math.max(0, Math.min(this.size - 1, truePos[0] + randomInt(-1, 1)));
       const jc = Math.max(0, Math.min(this.size - 1, truePos[1] + randomInt(-1, 1)));
       const key = `${jr},${jc}`;
       if (!this.obstacles.has(key) || (jr === truePos[0] && jc === truePos[1])) {
-        return { row: jr, col: jc };
+        return [jr, jc];
       }
     }
-    return { row: truePos[0], col: truePos[1] };
+    return [truePos[0], truePos[1]];
   }
 
-  private turnPhrase(from: Direction, to: Direction): string {
-    if (from === to) return `保持朝${DIR_ZH[from]}`;
-    const cw = (to - from + 4) % 4;
-    if (cw === 1) return `右转，朝${DIR_ZH[to]}`;
-    if (cw === 2) return `掉头，现朝${DIR_ZH[to]}`;
-    return `左转，朝${DIR_ZH[to]}`;
+  private noisyPolar(truePos: [number, number]): { cell: [number, number]; polar: PolarReading } {
+    const cell = this.noisyTargetCell(truePos);
+    const raw = this.polarFromCells(this.carPos, cell, this.carDir);
+    const bearing_jitter = randomInt(-12, 12);
+    const dist_jitter = randomInt(-10, 10) / 10;
+    return {
+      cell,
+      polar: {
+        bearing_deg: normalizeAngle(raw.bearing_deg + bearing_jitter),
+        distance_m: Math.max(0.1, Math.round((raw.distance_m + dist_jitter) * 10) / 10)
+      }
+    };
   }
 
   detectObjects(): string {
@@ -141,48 +208,47 @@ export class GridCarEnv {
     this.detectFrameId = this.photoFrameId;
     this.arrivedAtNavTarget = false;
 
-    const car = { row: this.carPos[0], col: this.carPos[1], heading: DIR_ZH[this.carDir] };
     const [h0, h1] = this.hints;
-    const est0 = this.noisyReport(this.pickupCell);
-    const est1 = this.noisyReport(this.placeCell);
-
     const navigatingToPickup = !this.carrying;
     const targetIndex = navigatingToPickup ? 0 : 1;
     const targetHint = navigatingToPickup ? h0 : h1;
-    const targetPos = navigatingToPickup ? est0 : est1;
+    const trueCell = navigatingToPickup ? this.pickupCell : this.placeCell;
+    const { cell, polar } = this.noisyPolar(trueCell);
+    this.lastNavTarget = cell;
 
     const otherHint = navigatingToPickup ? h1 : h0;
     const phaseNote =
       navigatingToPickup && otherHint ?
-        `\n⚠️ 当前未携带：本帧只能识别第一段目标「${targetHint || "index0"}」。` +
-          `若要找「${otherHint}」，须先 pick_up 完成拾取后再 take_photo → detect_objects。\n`
+        `\n⚠️ 未携带：本帧仅识别第一段目标「${targetHint || "index0"}」。找「${otherHint}」须先 pick_up 再拍照识别。\n`
       : !navigatingToPickup && h0 ?
         `\n（已携带：本帧识别第二段放置目标。）\n`
       : "";
 
     const head =
-      `【视觉识别 · 照片帧 #${this.photoFrameId}】以下为**估计坐标**（每次识别可有 ±1 格抖动，无精确地图）。\n` +
-      `小车：(${car.row},${car.col}) 朝${car.heading}\n` +
-      `本帧导航目标 index=${targetIndex}${targetHint ? `「${targetHint}」` : ""}：约 (${targetPos.row},${targetPos.col})\n` +
+      `【视觉识别 · 帧 #${this.photoFrameId}】相对**当前车头**的极坐标（非地图格子坐标）。\n` +
+      `车头朝向：${DIR_ZH[this.carDir]}\n` +
+      `目标 index=${targetIndex}${targetHint ? `「${targetHint}」` : ""}：` +
+      `方位 bearing_deg=${polar.bearing_deg}°（0°=正前方，顺时针为正），距离 distance_m=${polar.distance_m} m（约 ${Math.round(polar.distance_m)} 格）\n` +
+      `→ 请调用 go_to(bearing_deg=${polar.bearing_deg}, distance_m=${polar.distance_m})\n` +
       phaseNote +
-      `请用该坐标调用 go_to；抵达后 pick_up 或 drop 即可（仿真不校验隐藏真值格）。`;
+      `到位后可 pick_up 或 drop。`;
 
     const machine = {
-      sim: "onboard_camera_grid",
+      sim: "onboard_camera_polar",
       photo_frame: this.photoFrameId,
-      grid_size: this.size,
-      car,
+      car_heading: DIR_ZH[this.carDir],
       navigation_target: {
         index: targetIndex,
         ...(targetHint ? { hint: targetHint } : {}),
-        position: targetPos
+        bearing_deg: polar.bearing_deg,
+        distance_m: polar.distance_m
       },
-      note: "coordinates are noisy estimates; go_to then pick_up/drop succeeds on arrival"
+      note: "bearing relative to current heading; 0=forward, clockwise positive"
     };
     return `${head}\n\n${JSON.stringify(machine, null, 2)}`;
   }
 
-  goTo(targetX: number, targetY: number): string {
+  goTo(bearingDeg: number, distanceM: number): string {
     if (this.done) return "任务已完成！";
 
     if (this.goFrameId >= this.detectFrameId) {
@@ -192,86 +258,54 @@ export class GridCarEnv {
       );
     }
 
-    const target: [number, number] = [
-      Math.max(0, Math.min(this.size - 1, Math.floor(targetX))),
-      Math.max(0, Math.min(this.size - 1, Math.floor(targetY)))
-    ];
-
-    if (!this.isValid(target)) {
-      return `❌ (${targetX},${targetY}) 越界或是障碍格。`;
+    if (this.lastNavTarget === null) {
+      return "❌ 尚无本段识别结果，请先 detect_objects。";
     }
+
+    const bearing = normalizeAngle(Number(bearingDeg));
+    const distance = Math.max(0, Number(distanceM));
+    const moveDeg = directionToDeg(this.carDir) + bearing;
+    const moveDir = degToDirection(moveDeg);
 
     this.arrivedAtNavTarget = false;
+    const turnNote =
+      this.carDir === moveDir ?
+        `保持朝${DIR_ZH[moveDir]}`
+      : `转向 ${bearing}°（现朝${DIR_ZH[moveDir]}）`;
 
-    if (this.posEq(this.carPos, target)) {
-      this.goFrameId = this.detectFrameId;
-      this.arrivedAtNavTarget = true;
-      return `✅ 已在识别目标 (${target[0]},${target[1]})，可 pick_up 或 drop。`;
-    }
+    this.carDir = moveDir;
+    const steps = Math.round(distance);
+    const [dr, dc] = DIR_DELTA[moveDir];
+    let moved = 0;
+    const pathNotes: string[] = [];
 
-    const path = this.bfs(this.carPos, target);
-    if (path === null) {
-      return `❌ 无法到达估计点 (${target[0]},${target[1]})。`;
-    }
-
-    path.shift();
-    this.goFrameId = this.detectFrameId;
-    const nav = this.navigateVerbose(path);
-    this.arrivedAtNavTarget = true;
-    return (
-      `🎯 已按识别坐标抵达 (${this.carPos[0]},${this.carPos[1]})（目标约 (${target[0]},${target[1]})）。\n` +
-      `可执行 ${this.carrying ? "drop" : "pick_up"}。\n\n${nav}`
-    );
-  }
-
-  private navigateVerbose(path: [number, number][]): string {
-    const events: string[] = [];
-    for (const stepPos of path) {
+    for (let i = 0; i < steps; i++) {
       if (this.done) break;
-
-      this.steps++;
-      if (this.steps >= this.maxSteps) {
-        this.done = true;
-        events.push("⚠️ 达到最大步数，任务失败！");
+      const limit = this.consumeStep();
+      if (limit) {
+        pathNotes.push(limit);
         break;
       }
-
-      const dr = stepPos[0] - this.carPos[0];
-      const dc = stepPos[1] - this.carPos[1];
-      let needDir: Direction;
-      if (dr === 1) needDir = Direction.DOWN;
-      else if (dr === -1) needDir = Direction.UP;
-      else if (dc === 1) needDir = Direction.RIGHT;
-      else needDir = Direction.LEFT;
-
-      const turn = this.turnPhrase(this.carDir, needDir);
-      this.carDir = needDir;
-      this.carPos = stepPos;
-      events.push(`${turn}；前进 → (${this.carPos[0]},${this.carPos[1]}) 朝${DIR_ZH[this.carDir]}`);
-    }
-
-    return `🚗 ${path.length} 步\n` + events.map((e) => `  · ${e}`).join("\n");
-  }
-
-  private bfs(start: [number, number], goal: [number, number]): [number, number][] | null {
-    const queue: [number, number][][] = [[start]];
-    const visited = new Set([`${start[0]},${start[1]}`]);
-
-    while (queue.length > 0) {
-      const path = queue.shift()!;
-      const curr = path[path.length - 1]!;
-      if (this.posEq(curr, goal)) return path;
-
-      for (const [dr, dc] of GRID_DIRS) {
-        const nxt: [number, number] = [curr[0] + dr, curr[1] + dc];
-        const key = `${nxt[0]},${nxt[1]}`;
-        if (this.isValid(nxt) && !visited.has(key)) {
-          visited.add(key);
-          queue.push([...path, nxt]);
-        }
+      const nxt: [number, number] = [this.carPos[0] + dr, this.carPos[1] + dc];
+      if (!this.isValid(nxt)) {
+        pathNotes.push(`⚠️ 前进受阻于障碍，停在 (${this.carPos[0]},${this.carPos[1]})。`);
+        break;
       }
+      this.carPos = nxt;
+      moved++;
+      pathNotes.push(`前进 1m → 累计 ${moved}m`);
     }
-    return null;
+
+    this.goFrameId = this.detectFrameId;
+    const remain = this.cellDistanceM(this.carPos, this.lastNavTarget);
+    this.arrivedAtNavTarget = remain <= 1.25 || moved >= steps;
+
+    const status =
+      this.arrivedAtNavTarget ?
+        `✅ 已按 bearing=${bearing}°、distance=${distance}m 完成本段移动（实际 ${moved}m），距目标约 ${remain.toFixed(1)}m。可 ${this.carrying ? "drop" : "pick_up"}。`
+      : `⚠️ 已移动 ${moved}m，距识别目标仍约 ${remain.toFixed(1)}m，可再微调 go_to 或重新 detect。`;
+
+    return `${turnNote}，${status}\n${pathNotes.length ? pathNotes.map((n) => `  · ${n}`).join("\n") : ""}`;
   }
 
   pickUp(): string {
@@ -280,7 +314,7 @@ export class GridCarEnv {
     if (limit) return limit;
     if (this.carrying) return "⚠️ 已在携带物体。";
     if (!this.arrivedAtNavTarget) {
-      return "❌ 请先按流程 go_to 抵达本段识别目标，再 pick_up。";
+      return "❌ 请先 go_to 按识别方位/距离到位，再 pick_up。";
     }
     this.carrying = true;
     this.arrivedAtNavTarget = false;
@@ -293,7 +327,7 @@ export class GridCarEnv {
     if (limit) return limit;
     if (!this.carrying) return "❌ 当前未携带，无法放下。";
     if (!this.arrivedAtNavTarget) {
-      return "❌ 请先 go_to 抵达放置点识别坐标，再 drop。";
+      return "❌ 请先 go_to 按识别方位/距离到位，再 drop。";
     }
     this.carrying = false;
     this.arrivedAtNavTarget = false;
@@ -304,8 +338,8 @@ export class GridCarEnv {
   getStatusText(): string {
     if (this.done) return "任务已完成！";
     const phase = this.carrying ? "去放置" : "去拾取";
-    const nav = this.arrivedAtNavTarget ? "已抵达本段目标" : "未抵达";
-    return `小车(${this.carPos[0]},${this.carPos[1]}) | ${phase} | ${nav} | 步${this.steps}/${this.maxSteps}`;
+    const nav = this.arrivedAtNavTarget ? "已到位" : "未到位";
+    return `小车 朝${DIR_ZH[this.carDir]} | ${phase} | ${nav} | 步${this.steps}/${this.maxSteps}`;
   }
 
   private consumeStep(): string | null {
@@ -320,9 +354,5 @@ export class GridCarEnv {
   private isValid(pos: [number, number]): boolean {
     const [r, c] = pos;
     return r >= 0 && r < this.size && c >= 0 && c < this.size && !this.obstacles.has(`${r},${c}`);
-  }
-
-  private posEq(a: [number, number], b: [number, number]): boolean {
-    return a[0] === b[0] && a[1] === b[1];
   }
 }

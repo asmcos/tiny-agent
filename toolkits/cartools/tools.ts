@@ -17,7 +17,7 @@ export function createCarTools(env: GridCarEnv): Tool[] {
       {
         name: "detect_objects",
         description:
-          "根据上一张 take_photo 的画面识别当前导航目标的估计坐标（每次只定位一个目标）；须先拍照。",
+          "识别导航目标：返回相对车头的 bearing_deg（方位角，0°=正前，顺时针为正）与 distance_m（距离，米）。须先 take_photo。",
         inputs: {},
         outputType: "string"
       },
@@ -26,19 +26,26 @@ export function createCarTools(env: GridCarEnv): Tool[] {
     tool(
       {
         name: "go_to",
-        description: "移动到格点 targetX=行、targetY=列；本轮须已已知距离，如果距离未知请先 take_photo → detect_objects。",
+        description:
+          "按极坐标移动：bearing_deg 相对当前车头，distance_m 前进距离（米，约等于格数）。须先 take_photo → detect_objects，参数与 detect 一致。",
         inputs: {
-          targetX: { type: "number", description: "行（0 起）" },
-          targetY: { type: "number", description: "列（0 起）" }
+          bearing_deg: {
+            type: "number",
+            description: "相对方位角（度），0=正前方，顺时针为正，与 detect 的 bearing_deg 一致"
+          },
+          distance_m: {
+            type: "number",
+            description: "前进距离（米），与 detect 的 distance_m 一致"
+          }
         },
         outputType: "string"
       },
-      async (args) => env.goTo(Number(args.targetX), Number(args.targetY))
+      async (args) => env.goTo(Number(args.bearing_deg), Number(args.distance_m))
     ),
     tool(
       {
         name: "pick_up",
-        description: "拾取当前段目标 此段最好已经通过take_photo → detect_objects → go_to 到达目标点。",
+        description: "拾取；须本段已 go_to 到位（take_photo → detect_objects → go_to）。",
         inputs: {},
         outputType: "string"
       },
@@ -47,7 +54,7 @@ export function createCarTools(env: GridCarEnv): Tool[] {
     tool(
       {
         name: "drop",
-        description: "放下物体（须已携带且本段 go_to 已完成）。",
+        description: "放下物体；须已携带且本段 go_to 已到位。",
         inputs: {},
         outputType: "string"
       },
