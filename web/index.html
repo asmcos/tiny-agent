@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>tiny-agent</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">tiny-agent</div>
+        <button id="new-chat" type="button">新对话</button>
+        <div class="section">模块</div>
+        <nav id="modules"></nav>
+        <div class="sidebar-foot" id="meta"></div>
+      </aside>
+      <main class="canvas">
+        <header class="topbar">
+          <div>
+            <div class="title">对话</div>
+            <div class="subtitle" id="workspace"></div>
+          </div>
+          <div class="model" id="model"></div>
+        </header>
+        <div id="transcript" class="transcript">
+          <div class="empty" id="empty">
+            <h1>说一句话</h1>
+            <p>会按整段对话分到编程、电脑控制、系统维修、Word、PPT 或小车。</p>
+          </div>
+        </div>
+        <div id="approval" class="approval hidden"></div>
+        <form id="composer" class="composer">
+          <textarea id="input" rows="1" placeholder="给 tiny-agent 一个任务"></textarea>
+          <button id="send" type="submit">发送</button>
+        </form>
+      </main>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+</html>

@@ -1,10 +1,11 @@
 {
-  "activeProvider": "deepseek",
+  "schemaVersion": 1,
+  "activeProvider": "opencode",
   "providers": {
     "ollama": {
       "model": "llama3.2",
       "temperature": 0.2,
-      "baseUrl": "http://127.0.0.1:11434"
+      "baseUrl": "http://127.0.0.1:11434/v1"
     },
     "deepseek": {
       "model": "deepseek-v4-flash",
@@ -12,32 +13,28 @@
       "maxTokens": 4096,
       "apiKey": "sk-",
       "baseUrl": "https://api.deepseek.com/v1"
+    },
+    "opencode": {
+      "model": "longcat-2.5-preview-free",
+      "temperature": 0.2,
+      "maxTokens": 4096,
+      "apiKey": "oc_sk-",
+      "baseUrl": "https://opencode.ai/zen/go/v1"
     }
-
   },
-  "limits": {
-    "maxRounds": 12,
-    "maxHistoryItems": 24,
-    "summaryCharLimit": 800
+  "agent": {
+    "maxIterations": 30,
+    "maxToolCalls": 60,
+    "maxConsecutiveFailures": 3,
+    "maxTaskDurationMs": 1800000,
+    "maxContextMessages": 24
   },
-  "skill": {
-    "rootDir": ".tiny-agent/skills",
-    "summaryHeadLines": 4
+  "permissions": {
+    "mode": "read_only",
+    "allowCommands": []
   },
-  "runtime": {
-    "planOnly": false,
-    "maxStepRounds": 20,
-    "contextWindow": 24,
-    "toolOutputMaxChars": 4000,
-    "maxPlanSteps": 24,
-    "planningInterval": 0,
-    "structuredPlanning": false,
-    "compactPlanExecution": true,
-    "maxRoundsPerPlanStep": 5,
-    "skipFinalSummary": true
-  },
-  "prompts": {
-    "planner": "",
-    "executor": ""
+  "terminal": {
+    "defaultTimeoutSeconds": 120,
+    "maxOutputCharacters": 30000
   }
 }

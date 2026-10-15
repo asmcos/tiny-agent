@@ -1,59 +1,99 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { AppConfig } from "./types";
+import type { PermissionMode } from "./tools/contracts";
+import type { StopLimits } from "./agent/core/stop-policy";
 
-const DEFAULT_CONFIG_PATH = path.resolve(process.cwd(), "config.json");
+export type ProviderName = "ollama" | "deepseek" | "opencode";
 
-function resolveConfigPath(explicitPath?: string): string {
-  if (explicitPath != null && explicitPath !== "") {
-    return path.isAbsolute(explicitPath) ? explicitPath : path.resolve(process.cwd(), explicitPath);
-  }
-  if (process.env.TINY_AGENT_CONFIG != null && process.env.TINY_AGENT_CONFIG !== "") {
-    return path.resolve(process.cwd(), process.env.TINY_AGENT_CONFIG);
-  }
-  return DEFAULT_CONFIG_PATH;
+export type OpenAIProviderConfig = {
+  model: string;
+  temperature?: number;
+  maxTokens?: number;
+  apiKey?: string;
+  baseUrl?: string;
+};
+
+export type AppConfig = {
+  schemaVersion: number;
+  activeProvider: ProviderName;
+  providers: {
+    ollama: OpenAIProviderConfig;
+    deepseek: OpenAIProviderConfig;
+    opencode?: OpenAIProviderConfig;
+  };
+  agent: StopLimits & { maxContextMessages: number };
+  permissions: { mode: PermissionMode; allowCommands: string[] };
+  terminal: { defaultTimeoutSeconds: number; maxOutputCharacters: number };
+};
+
+const DEFAULTS = {
+  agent: {
+    maxIterations: 30,
+    maxToolCalls: 60,
+    maxConsecutiveFailures: 3,
+    maxTaskDurationMs: 1_800_000,
+    maxContextMessages: 24
+  },
+  permissions: { mode: "read_only" as PermissionMode, allowCommands: [] as string[] },
+  terminal: { defaultTimeoutSeconds: 120, maxOutputCharacters: 30_000 }
+};
+
+export function ensureOpenAIBaseUrl(baseUrl: string): string {
+  const cleaned = baseUrl.replace(/\/+$/, "");
+  return cleaned.endsWith("/v1") ? cleaned : `${cleaned}/v1`;
 }
 
 export function loadConfig(explicitPath?: string): AppConfig {
-  const configPath = resolveConfigPath(explicitPath);
+  const configPath = explicitPath
+    ? path.resolve(explicitPath)
+    : path.resolve(process.env.TINY_AGENT_CONFIG || "config.json");
   if (!fs.existsSync(configPath)) {
     throw new Error(`Missing config file: ${configPath}`);
   }
-  const raw = fs.readFileSync(configPath, "utf8");
-  const parsed = JSON.parse(raw) as AppConfig;
-  validateConfig(parsed);
-  return parsed;
+  const raw = JSON.parse(fs.readFileSync(configPath, "utf8")) as Partial<AppConfig> & {
+    runtime?: { maxTaskDurationSeconds?: number };
+  };
+  const active = raw.activeProvider ?? "deepseek";
+  if (active === "opencode") {
+    if (!raw.providers?.opencode?.apiKey || !raw.providers.opencode.model) {
+      throw new Error("config.providers.opencode.model 和 apiKey 必填");
+    }
+  } else if (active === "ollama") {
+    if (!raw.providers?.ollama?.model) throw new Error("config.providers.ollama.model 必填");
+  } else if (!raw.providers?.deepseek?.apiKey || !raw.providers.deepseek.model) {
+    throw new Error("config.providers.deepseek.model 和 apiKey 必填");
+  }
+  if (!raw.providers?.ollama?.model) {
+    throw new Error("config.providers.ollama.model 必填");
+  }
+  if (!raw.providers.deepseek?.model || !raw.providers.deepseek.apiKey) {
+    throw new Error("config.providers.deepseek.model 和 apiKey 必填");
+  }
+  const durationMs =
+    raw.agent?.maxTaskDurationMs ??
+    (raw.runtime?.maxTaskDurationSeconds ? raw.runtime.maxTaskDurationSeconds * 1000 : undefined) ??
+    DEFAULTS.agent.maxTaskDurationMs;
+  return {
+    schemaVersion: raw.schemaVersion ?? 1,
+    activeProvider: active,
+    providers: {
+      ollama: raw.providers.ollama,
+      deepseek: raw.providers.deepseek,
+      ...(raw.providers.opencode ? { opencode: raw.providers.opencode } : {})
+    },
+    agent: { ...DEFAULTS.agent, ...raw.agent, maxTaskDurationMs: durationMs },
+    permissions: { ...DEFAULTS.permissions, ...raw.permissions },
+    terminal: { ...DEFAULTS.terminal, ...raw.terminal }
+  };
 }
 
-/** Same as `loadConfig` but returns `undefined` if the file is missing (no throw). */
-export function tryLoadConfig(explicitPath?: string): AppConfig | undefined {
-  const configPath = resolveConfigPath(explicitPath);
-  if (!fs.existsSync(configPath)) {
-    return undefined;
-  }
-  const raw = fs.readFileSync(configPath, "utf8");
-  const parsed = JSON.parse(raw) as AppConfig;
-  validateConfig(parsed);
-  return parsed;
+export function limitsFromConfig(config: AppConfig): StopLimits {
+  return {
+    maxIterations: config.agent.maxIterations,
+    maxToolCalls: config.agent.maxToolCalls,
+    maxConsecutiveFailures: config.agent.maxConsecutiveFailures,
+    maxTaskDurationMs: config.agent.maxTaskDurationMs
+  };
 }
 
-function validateConfig(config: AppConfig): void {
-  if (!config.providers) {
-    throw new Error("config.providers is required");
-  }
-  if (!config.providers.ollama || !config.providers.deepseek) {
-    throw new Error("config.providers.ollama and config.providers.deepseek are required");
-  }
-  if (!config.providers.ollama.model) {
-    throw new Error("config.providers.ollama.model is required");
-  }
-  if (!config.providers.deepseek.model) {
-    throw new Error("config.providers.deepseek.model is required");
-  }
-  if (!config.providers.deepseek.apiKey) {
-    throw new Error("config.providers.deepseek.apiKey is required");
-  }
-  if (!config.runtime) {
-    throw new Error("config.runtime is required");
-  }
-}
+export type { StopLimits };
